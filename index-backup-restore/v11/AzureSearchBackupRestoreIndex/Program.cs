@@ -37,14 +37,39 @@ class Program
 
     static void Main()
     {
-        //Get source and target search service info and index names from appsettings.json file
-        //Set up source and target search service clients
+        //Get search service settings and set up the source index client
         ConfigurationSetup();
 
-        //Backup the source index
+        //Discover and back up all indexes in the source search service
         Console.WriteLine("\nSTART INDEX BACKUP");
-        BackupIndexAndDocuments();
+        string[] sourceIndexNames = SourceIndexClient.GetIndexNames().ToArray();
+        if (sourceIndexNames.Length == 0)
+        {
+            Console.WriteLine("No indexes found in source search service.");
+        }
 
+        string backupRootDirectory = BackupDirectory;
+        foreach (string indexName in sourceIndexNames)
+        {
+            SourceIndexName = indexName;
+            SourceSearchClient = SourceIndexClient.GetSearchClient(SourceIndexName);
+            BackupDirectory = Path.Combine(backupRootDirectory, SourceIndexName);
+            Directory.CreateDirectory(BackupDirectory);
+
+            Console.WriteLine("\n========================================");
+            Console.WriteLine("BACKUP INDEX: {0}", SourceIndexName);
+            Console.WriteLine("========================================");
+            BackupIndexAndDocuments();
+            Console.WriteLine("COMPLETED: {0}", SourceIndexName);
+        }
+
+        Console.WriteLine("\n========================================");
+        Console.WriteLine("ALL INDEX BACKUPS COMPLETED");
+        Console.WriteLine("Total indexes: {0}", sourceIndexNames.Length);
+        Console.WriteLine("========================================");
+        return;
+
+        /*
         //Recreate and import content to target index
         Console.WriteLine("\nSTART INDEX RESTORE");
         DeleteIndex();
@@ -63,6 +88,7 @@ class Program
 
         Console.WriteLine("Press any key to continue...");
         Console.ReadLine();
+        */
     }
 
     static void ConfigurationSetup()
@@ -73,25 +99,24 @@ class Program
 
         SourceSearchServiceName = configuration["SourceSearchServiceName"];
         SourceAdminKey = configuration["SourceAdminKey"];
-        SourceIndexName = configuration["SourceIndexName"];
         TargetSearchServiceName = configuration["TargetSearchServiceName"];
         TargetAdminKey = configuration["TargetAdminKey"];
         TargetIndexName = configuration["TargetIndexName"];
         BackupDirectory = configuration["BackupDirectory"];
 
         Console.WriteLine("CONFIGURATION:");
-        Console.WriteLine("\n  Source service and index {0}, {1}", SourceSearchServiceName, SourceIndexName);
+        Console.WriteLine("\n  Source service: {0} (all indexes)", SourceSearchServiceName);
         Console.WriteLine("\n  Target service and index: {0}, {1}", TargetSearchServiceName, TargetIndexName);
         Console.WriteLine("\n  Backup directory: " + BackupDirectory);
         Console.WriteLine("\nDoes this look correct? Press any key to continue, Ctrl+C to cancel.");
         Console.ReadLine();
 
         SourceIndexClient = new SearchIndexClient(new Uri("https://" + SourceSearchServiceName + ".search.windows.net"), new AzureKeyCredential(SourceAdminKey));
-        SourceSearchClient = SourceIndexClient.GetSearchClient(SourceIndexName);
 
-
+        /*
         TargetIndexClient = new SearchIndexClient(new Uri($"https://" + TargetSearchServiceName + ".search.windows.net"), new AzureKeyCredential(TargetAdminKey));
         TargetSearchClient = TargetIndexClient.GetSearchClient(TargetIndexName);
+        */
     }
 
     static void BackupIndexAndDocuments()
@@ -162,7 +187,7 @@ class Program
             json = json.Substring(0, json.Length - 3); // remove trailing comma
             File.WriteAllText(FileName, "{\"value\": [");
             File.AppendAllText(FileName, json);
-            File.AppendAllText(FileName, "]}");
+            File.AppendAllText(FileName, "}]}");
             Console.WriteLine("  Total documents: {0}", response.GetResults().Count().ToString());
             json = string.Empty;
         }

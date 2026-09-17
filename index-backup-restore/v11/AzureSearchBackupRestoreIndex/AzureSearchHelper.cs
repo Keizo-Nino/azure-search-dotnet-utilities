@@ -26,7 +26,7 @@ public class AzureSearchHelper
 {
     // Azure AI Search requires that we use at least the API version "2024-03-01-Preview" to access all index features.
     // Hence, this API version string is used for requests to Azure AI Search.
-    private const string ApiVersionString = "api-version=2024-03-01-Preview";
+    private const string ApiVersionString = "api-version=2023-10-01-Preview";
 
     private static readonly JsonSerializerOptions JsonOptions;
 
