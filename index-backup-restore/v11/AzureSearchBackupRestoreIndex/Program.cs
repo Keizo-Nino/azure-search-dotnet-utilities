@@ -19,6 +19,7 @@ namespace AzureSearchBackupRestoreIndex;
 
 class Program
 {
+    private static string Mode;
     private static string SourceSearchServiceName;
     private static string SourceAdminKey;
     private static string SourceIndexName;
@@ -35,10 +36,30 @@ class Program
     private static int MaxBatchSize = 500;          // JSON files will contain this many documents / file and can be up to 1000
     private static int ParallelizedJobs = 10;       // Output content in parallel jobs
 
-    static void Main()
+    static int Main()
     {
-        //Get search service settings and set up the source index client
+        try
+        {
+            Run();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Error: {0}", ex.Message);
+            return 1;
+        }
+    }
+
+    static void Run()
+    {
+        //Get settings and set up the client for the selected mode
         ConfigurationSetup();
+
+        if (Mode.Equals("Restore", StringComparison.OrdinalIgnoreCase))
+        {
+            RestoreAllIndexes();
+            return;
+        }
 
         //Discover and back up all indexes in the source search service
         Console.WriteLine("\nSTART INDEX BACKUP");
@@ -67,28 +88,69 @@ class Program
         Console.WriteLine("ALL INDEX BACKUPS COMPLETED");
         Console.WriteLine("Total indexes: {0}", sourceIndexNames.Length);
         Console.WriteLine("========================================");
-        return;
+    }
 
-        /*
-        //Recreate and import content to target index
+    static void RestoreAllIndexes()
+    {
         Console.WriteLine("\nSTART INDEX RESTORE");
-        DeleteIndex();
-        CreateTargetIndex();
-        ImportFromJSON();
-        Console.WriteLine("\n  Waiting 10 seconds for target to index content...");
-        Console.WriteLine("  NOTE: For really large indexes it may take longer to index all content.\n");
-        Thread.Sleep(10000);
+        string[] indexDirectories = Directory.GetDirectories(BackupDirectory)
+            .OrderBy(directory => directory, StringComparer.Ordinal).ToArray();
+        var backupCounts = new Dictionary<string, long>();
 
-        // Validate all content is in target index
-        int sourceCount = GetCurrentDocCount(SourceSearchClient);
-        int targetCount = GetCurrentDocCount(TargetSearchClient);
-        Console.WriteLine("\nSAFEGUARD CHECK: Source and target index counts should match");
-        Console.WriteLine(" Source index contains {0} docs", sourceCount);
-        Console.WriteLine(" Target index contains {0} docs\n", targetCount);
+        // Validate every backup before deleting any target index.
+        foreach (string directory in indexDirectories)
+        {
+            string indexName = Path.GetFileName(directory);
+            using (JsonDocument schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, indexName + ".schema"))))
+            {
+                if (schema.RootElement.GetProperty("name").GetString() != indexName)
+                    throw new InvalidDataException("Schema name does not match backup folder: " + directory);
+                schema.RootElement.GetProperty("fields").GetArrayLength();
+            }
 
-        Console.WriteLine("Press any key to continue...");
-        Console.ReadLine();
-        */
+            long documentCount = 0;
+            foreach (string fileName in Directory.GetFiles(directory, indexName + "*.json"))
+            {
+                using JsonDocument documents = JsonDocument.Parse(File.ReadAllText(fileName));
+                documentCount += documents.RootElement.GetProperty("value").GetArrayLength();
+            }
+            backupCounts.Add(directory, documentCount);
+        }
+
+        if (indexDirectories.Length == 0)
+            Console.WriteLine("No index backup folders found.");
+
+        foreach (string directory in indexDirectories)
+        {
+            BackupDirectory = directory;
+            SourceIndexName = Path.GetFileName(directory);
+            TargetIndexName = SourceIndexName;
+            TargetSearchClient = TargetIndexClient.GetSearchClient(TargetIndexName);
+
+            Console.WriteLine("\n========================================");
+            Console.WriteLine("RESTORE INDEX: {0}", TargetIndexName);
+            Console.WriteLine("========================================");
+            if (!DeleteIndex())
+                throw new InvalidOperationException("Could not delete target index: " + TargetIndexName);
+            CreateTargetIndex();
+            ImportFromJSON();
+            Console.WriteLine("\n  Waiting 10 seconds for target to index content...");
+            Console.WriteLine("  NOTE: For really large indexes it may take longer to index all content.\n");
+            Thread.Sleep(10000);
+
+            int targetCount = GetCurrentDocCount(TargetSearchClient);
+            Console.WriteLine("\nSAFEGUARD CHECK: Backup and target index counts should match");
+            Console.WriteLine(" Backup contains {0} docs", backupCounts[directory]);
+            Console.WriteLine(" Target index contains {0} docs\n", targetCount);
+            if (targetCount != backupCounts[directory])
+                throw new InvalidOperationException("Document counts do not match for index: " + TargetIndexName);
+            Console.WriteLine("COMPLETED: {0}", TargetIndexName);
+        }
+
+        Console.WriteLine("\n========================================");
+        Console.WriteLine("ALL INDEX RESTORES COMPLETED");
+        Console.WriteLine("Total indexes: {0}", indexDirectories.Length);
+        Console.WriteLine("========================================");
     }
 
     static void ConfigurationSetup()
@@ -97,26 +159,43 @@ class Program
         IConfigurationBuilder builder = new ConfigurationBuilder().AddJsonFile("appsettings.json");
         IConfigurationRoot configuration = builder.Build();
 
+        Mode = configuration["Mode"] ?? "Backup";
+        bool isBackup = Mode.Equals("Backup", StringComparison.OrdinalIgnoreCase);
+        if (!isBackup && !Mode.Equals("Restore", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Mode must be Backup or Restore.");
+
         SourceSearchServiceName = configuration["SourceSearchServiceName"];
         SourceAdminKey = configuration["SourceAdminKey"];
         TargetSearchServiceName = configuration["TargetSearchServiceName"];
         TargetAdminKey = configuration["TargetAdminKey"];
-        TargetIndexName = configuration["TargetIndexName"];
         BackupDirectory = configuration["BackupDirectory"];
 
+        if (string.IsNullOrWhiteSpace(BackupDirectory))
+            throw new ArgumentException("BackupDirectory is required.");
+        if (isBackup && (string.IsNullOrWhiteSpace(SourceSearchServiceName) || string.IsNullOrWhiteSpace(SourceAdminKey)))
+            throw new ArgumentException("Backup requires SourceSearchServiceName and SourceAdminKey.");
+        if (!isBackup && (string.IsNullOrWhiteSpace(TargetSearchServiceName) || string.IsNullOrWhiteSpace(TargetAdminKey)))
+            throw new ArgumentException("Restore requires TargetSearchServiceName and TargetAdminKey.");
+        if (!isBackup && !Directory.Exists(BackupDirectory))
+            throw new DirectoryNotFoundException("BackupDirectory does not exist: " + BackupDirectory);
+
         Console.WriteLine("CONFIGURATION:");
-        Console.WriteLine("\n  Source service: {0} (all indexes)", SourceSearchServiceName);
-        Console.WriteLine("\n  Target service and index: {0}, {1}", TargetSearchServiceName, TargetIndexName);
+        Console.WriteLine("\n  Mode: {0}", Mode);
+        if (isBackup)
+            Console.WriteLine("\n  Source service: {0} (all indexes)", SourceSearchServiceName);
+        else
+        {
+            Console.WriteLine("\n  Target service: {0} (all index backup folders)", TargetSearchServiceName);
+            Console.WriteLine("  Existing target indexes with matching names will be deleted and recreated.");
+        }
         Console.WriteLine("\n  Backup directory: " + BackupDirectory);
         Console.WriteLine("\nDoes this look correct? Press any key to continue, Ctrl+C to cancel.");
         Console.ReadLine();
 
-        SourceIndexClient = new SearchIndexClient(new Uri("https://" + SourceSearchServiceName + ".search.windows.net"), new AzureKeyCredential(SourceAdminKey));
-
-        /*
-        TargetIndexClient = new SearchIndexClient(new Uri($"https://" + TargetSearchServiceName + ".search.windows.net"), new AzureKeyCredential(TargetAdminKey));
-        TargetSearchClient = TargetIndexClient.GetSearchClient(TargetIndexName);
-        */
+        if (isBackup)
+            SourceIndexClient = new SearchIndexClient(new Uri("https://" + SourceSearchServiceName + ".search.windows.net"), new AzureKeyCredential(SourceAdminKey));
+        else
+            TargetIndexClient = new SearchIndexClient(new Uri("https://" + TargetSearchServiceName + ".search.windows.net"), new AzureKeyCredential(TargetAdminKey));
     }
 
     static void BackupIndexAndDocuments()
@@ -255,6 +334,10 @@ class Program
         {
             TargetIndexClient.DeleteIndex(TargetIndexName);
         }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            // A new restore target does not need to be deleted.
+        }
         catch (Exception ex)
         {
             Console.WriteLine("  Error deleting index: {0}\n", ex.Message);
@@ -292,6 +375,7 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine("  Error: {0}", ex.Message);
+            throw;
         }
     }
 
@@ -334,11 +418,15 @@ class Program
                 Uri uri = new Uri(ServiceUri, "/indexes/" + TargetIndexName + "/docs/index");
                 HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Post, uri, json);
                 response.EnsureSuccessStatusCode();
+                using JsonDocument result = JsonDocument.Parse(response.Content.ReadAsStringAsync().Result);
+                if (result.RootElement.GetProperty("value").EnumerateArray().Any(document => !document.GetProperty("status").GetBoolean()))
+                    throw new InvalidOperationException("One or more documents could not be restored from: " + fileName);
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine("  Error: {0}", ex.Message);
+            throw;
         }
     }
 }
